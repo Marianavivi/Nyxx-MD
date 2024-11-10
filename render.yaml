@@ -1,0 +1,6 @@
+services:
+  - type: web        # Service type is web
+    name: Nyxx-MD  # Name of the service
+    env: docker      # Environment is Docker
+    region: Frankfurt # Deployment region
+    plan: free       # Plan type
