@@ -1,140 +1,171 @@
-import { join, dirname } from 'path';
-import { createRequire } from 'module';
-import { fileURLToPath } from 'url';
-import { setupMaster, fork } from 'cluster';
-import cfonts from 'cfonts';
-import readline from 'readline';
-import yargs from 'yargs';
-import chalk from 'chalk'; 
-import fs from 'fs'; 
-import './config.js';
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, jidNormalizedUser, getContentType, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
+const l = console.log;
+const { getBuffer, getGroupAdmins, getRandom, h2k, isUrl, Json, runtime, sleep, fetchJson } = require('./lib/functions');
+const fs = require('fs');
+const P = require('pino');
+const config = require('./config');
+const qrcode = require('qrcode-terminal');
+const util = require('util');
+const { sms, downloadMediaMessage } = require('./lib/msg');
+const axios = require('axios');
+const { File } = require('megajs');
+const express = require("express");
 
-const { PHONENUMBER_MCC } = await import('baileys');
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const require = createRequire(__dirname);
-const { say } = cfonts;
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-let isRunning = false;
+const ownerNumber = ['254732647560'];
+const app = express();
+const port = process.env.PORT || 8000;
 
-const question = (text) => new Promise((resolve) => rl.question(text, resolve));
-
-console.log(chalk.yellow.bold('—◉ Starting system...'));
-
-function verifyOrCreateAuthFolder() {
-  const authPath = join(__dirname, global.authFile);
-  if (!fs.existsSync(authPath)) {
-    fs.mkdirSync(authPath, { recursive: true });
-  }
+// Download session file if it doesn't exist
+if (!fs.existsSync(__dirname + '/nyxx_md_licence/creds.json')) {
+    if (!config.SESSION_ID) return console.log('Please add your session to SESSION_ID env !!');
+    const sessdata = config.SESSION_ID;
+    const filer = File.fromURL(`https://mega.nz/file/${sessdata}`);
+    filer.download((err, data) => {
+        if (err) throw err;
+        fs.writeFile(__dirname + '/nyxx_md_licence/creds.json', data, () => {
+            console.log("Session downloaded ✅");
+        });
+    });
 }
 
-function verifyCredsJson() {
-  const credsPath = join(__dirname, global.authFile, 'creds.json');
-  return fs.existsSync(credsPath);
+// Function to connect to WhatsApp
+async function connectToWA() {
+    const connectDB = require('./lib/mongodb');
+    connectDB();
+    const { readEnv } = require('./lib/database');
+    const config = await readEnv();
+    const prefix = config.PREFIX;
+    console.log("Connecting wa bot 🧬...");
+
+    const { state, saveCreds } = await useMultiFileAuthState(__dirname + '/nyxx_md_licence/');
+    var { version } = await fetchLatestBaileysVersion();
+    const conn = makeWASocket({
+        logger: P({ level: 'silent' }),
+        printQRInTerminal: false,
+        browser: Browsers.macOS("Firefox"),
+        syncFullHistory: true,
+        auth: state,
+        version
+    });
+
+    // Connection update events
+    conn.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'close') {
+            if (lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut) {
+                connectToWA();
+            }
+        } else if (connection === 'open') {
+            console.log('😼 Installing... ');
+            installPlugins(conn);
+            console.log('Bot connected to WhatsApp ✅');
+            let up = `𝗛𝗲𝘆 \n𝗜 𝗮𝗺\n𝗢𝗻𝗹𝗶𝗻𝗲 𝗡𝗼𝘄 🤡`;
+            conn.sendMessage(ownerNumber + "@s.whatsapp.net", { image: { url: `https://files.catbox.moe/y1hq7c.jpg` }, caption: up });
+        }
+    });
+
+    conn.ev.on('creds.update', saveCreds);
+
+    // Message upsert event
+    conn.ev.on('messages.upsert', async (mek) => {
+        mek = mek.messages[0];
+        if (!mek.message) return;
+        mek.message = (getContentType(mek.message) === 'ephemeralMessage') ? mek.message.ephemeralMessage.message : mek.message;
+
+        if (mek.key && mek.key.remoteJid === 'status@broadcast' && config.AUTO_READ_STATUS === "true") {
+            await conn.readMessages([mek.key]);
+        }
+
+        handleIncomingMessage(conn, mek);
+    });
 }
 
-function formatPhoneNumber(number) {
-  let formattedNumber = number.replace(/[^\d+]/g, '');
-  if (formattedNumber.startsWith('+254') && !formattedNumber.startsWith('+254')) {
-    formattedNumber = formattedNumber.replace('+254', '+254');
-  } else if (formattedNumber.startsWith('254') && !formattedNumber.startsWith('254')) {
-    formattedNumber = `+521${formattedNumber.slice(2)}`;
-  } else if (formattedNumber.startsWith('254') && formattedNumber.length >= 10) {
-    formattedNumber = `+${formattedNumber}`;
-  } else if (!formattedNumber.startsWith('+')) {
-    formattedNumber = `+${formattedNumber}`;
-  }
-  return formattedNumber;
+// Install plugins
+function installPlugins(conn) {
+    const path = require('path');
+    fs.readdirSync("./plugins/").forEach((plugin) => {
+        if (path.extname(plugin).toLowerCase() === ".js") {
+            require("./plugins/" + plugin);
+        }
+    });
+    console.log('Plugins installed successful ✅');
 }
 
-function isValidNumber(phoneNumber) {
-  const numberWithoutPlus = phoneNumber.replace('+', '');
-  return Object.keys(PHONENUMBER_MCC).some(code => numberWithoutPlus.startsWith(code));
-}
+// Handle incoming messages
+async function handleIncomingMessage(conn, mek) {
+    const m = sms(conn, mek);
+    const type = getContentType(mek.message);
+    const body = getMessageBody(type, mek);
 
-async function start(file) {
-  if (isRunning) return;
-  isRunning = true;
+    const from = mek.key.remoteJid;
+    const isCmd = body.startsWith(config.PREFIX);
+    const command = isCmd ? body.slice(config.PREFIX.length).trim().split(' ').shift().toLowerCase() : '';
+    const args = body.trim().split(/ +/).slice(1);
+    const q = args.join(' ');
 
-  say('The Nyxx\nBot', {
-    font: 'chrome',
-    align: 'center',
-    gradient: ['red', 'magenta'],
-  });
+    const sender = mek.key.fromMe ? (conn.user.id.split(':')[0] + '@s.whatsapp.net' || conn.user.id) : (mek.key.participant || mek.key.remoteJid);
+    const senderNumber = sender.split('@')[0];
+    const botNumber = conn.user.id.split(':')[0];
+    const isOwner = ownerNumber.includes(senderNumber) || botNumber.includes(senderNumber);
 
-  say(`Bot created by Mariana`, {
-    font: 'console',
-    align: 'center',
-    gradient: ['red', 'magenta'],
-  });
+    if (shouldIgnoreMessage(senderNumber, config)) return;
 
-  verifyOrCreateAuthFolder();
-
-  if (verifyCredsJson()) {
-    const args = [join(__dirname, file), ...process.argv.slice(2)];
-    setupMaster({ exec: args[0], args: args.slice(1) });
-    const p = fork();
-    return;
-  }
-
-  const option = await question(chalk.yellowBright.bold('—◉ Select an option (just the number):\n') + chalk.white.bold('1. With QR code\n2. With 8-digit text code\n—> '));
-
-  let phoneNumber = '';
-  if (option === '2') {
-    const inputNumber = await question(chalk.yellowBright.bold('\n—◉ Write your WhatsApp number:\n') + chalk.white.bold('◉ Example: +5219992095479\n—> '));
-    phoneNumber = formatPhoneNumber(inputNumber);
-    if (!isValidNumber(phoneNumber)) {
-      console.log(chalk.bgRed(chalk.white.bold('[ ERROR ] Invalid number. Ensure you entered your number in international format and started with the country code.\n—◉ Example:\n◉ +254732647560\n')));
-      process.exit(0);
+    const events = require('./command');
+    if (isCmd) {
+        const cmd = findCommand(events.commands, command);
+        if (cmd) executeCommand(cmd, conn, mek, m, { from, body, command, args, q, sender, senderNumber });
     }
-    process.argv.push(phoneNumber);
-  }
 
-  if (option === '1') {
-    process.argv.push('qr');
-  } else if (option === '2') {
-    process.argv.push('code');
-  }
-
-  const args = [join(__dirname, file), ...process.argv.slice(2)];
-  setupMaster({ exec: args[0], args: args.slice(1) });
-
-  const p = fork();
-
-  p.on('message', (data) => {
-    console.log(chalk.green.bold('—◉ RECEIVED:'), data);
-    switch (data) {
-      case 'reset':
-        p.process.kill();
-        isRunning = false;
-        start.apply(this, arguments);
-        break;
-      case 'uptime':
-        p.send(process.uptime());
-        break;
-    }
-  });
-
-  p.on('exit', (_, code) => {
-    isRunning = false;
-    console.error(chalk.red.bold('[ ERROR ] An unexpected error occurred:'), code);
-    p.process.kill();
-    isRunning = false;
-    start.apply(this, arguments);
-    if (process.env.pm_id) {
-      process.exit(1);
-    } else {
-      process.exit();
-    }
-  });
-
-  const opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse());
-  if (!opts['test']) {
-    if (!rl.listenerCount()) {
-      rl.on('line', (line) => {
-        p.emit('message', line.trim());
-      });
-    }
-  }
+    processEvents(events.commands, conn, mek, m, { from, body, isCmd, command, args, q, sender, senderNumber });
 }
 
-start('main.js');
+// Extract message body
+function getMessageBody(type, mek) {
+    return (type === 'conversation') ? mek.message.conversation :
+           (type === 'extendedTextMessage') ? mek.message.extendedTextMessage.text :
+           (type == 'imageMessage' && mek.message.imageMessage.caption) ? mek.message.imageMessage.caption :
+           (type == 'videoMessage' && mek.message.videoMessage.caption) ? mek.message.videoMessage.caption :
+           '';
+}
+
+// Check if the message should be ignored
+function shouldIgnoreMessage(senderNumber, config) {
+    return (!isOwner && config.MODE === "private") || (!isOwner && isGroup && config.MODE === "inbox") || (!isOwner && !isGroup && config.MODE === "groups");
+}
+
+// Find command
+function findCommand(commands, commandName) {
+    return commands.find((cmd) => cmd.pattern === commandName) || commands.find((cmd) => cmd.alias && cmd.alias.includes(commandName));
+}
+
+// Execute command
+function executeCommand(cmd, conn, mek, m, context) {
+    if (cmd.react) conn.sendMessage(context.from, { react: { text: cmd.react, key: mek.key } });
+    try {
+        cmd.function(conn, mek, m, context);
+    } catch (e) {
+        console.error("[PLUGIN ERROR] " + e);
+    }
+}
+
+// Process events
+function processEvents(commands, conn, mek, m, context) {
+    commands.forEach(async (command) => {
+        if (context.body && command.on === "body") {
+            command.function(conn, mek, m, context);
+        } else if (mek.q && command.on === "text") {
+            command.function(conn, mek, m, context);
+        } else if ((command.on === "image" || command.on === "photo") && mek.type === "imageMessage") {
+            command.function(conn, mek, m, context);
+        } else if (command.on === "sticker" && mek.type === "stickerMessage") {
+            command.function(conn, mek, m, context);
+        }
+    });
+}
+
+// Express server setup
+app.get("/", (req, res) => {
+    res.send("Hey, bot started✅");
+});
+app.listen(port, () => console.log(`Server listening on port http://localhost:${port}`));
+setTimeout(() => { connectToWA(); }, 4000);
