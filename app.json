@@ -1,0 +1,30 @@
+{
+  "name": "Nyxx-MD",
+  "description": "Introducing Nyxx-MD, your personal assistant on WhatsApp, seamlessly bridging the gap between convenience and communication. Whether you're managing daily tasks, seeking information, or simply looking for a reliable companion, Nyxx-MD is here to enhance your messaging experience.",
+  "logo": "https://files.catbox.moe/y1hq7c.jpg",
+  "keywords": ["bot"],
+  "success_url": "/",
+
+  "env": {
+    "SESSION_ID": {
+      "description": "Add Nyxx-MD Session ID",
+      "required": true
+    },
+    "MONGODB": {
+      "description": "Put your Mongodb url",
+      "required": true
+    },
+    "SECRET_KEY": {
+      "description": "Add your secret key for encryption",
+      "required": false
+    }
+  },
+
+  "buildpacks": [
+    {
+      "url": "https://github.com/heroku/heroku-buildpack-nodejs.git"
+    }
+  ],
+
+  "stack": "heroku-24"
+}
